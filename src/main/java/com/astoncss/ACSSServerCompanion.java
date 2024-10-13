@@ -38,22 +38,24 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
 public class ACSSServerCompanion implements ModInitializer {
-	public static final String MOD_ID = "acss-server-companion";
+    public static final String MOD_ID = "acss-server-companion";
     public static final String WHITELIST = "acss-whitelist.txt";
 
-	public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
-	private FloodgateApi floodgateApi = null;
-	private MemberMap verifiedMembers = new MemberMap();
+    public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+    private FloodgateApi floodgateApi = null;
+    private MemberMap verifiedMembers = new MemberMap();
     private File whitelistFile = new File(String.valueOf(FabricLoader.getInstance().getConfigDir()), WHITELIST);
+    private ArrayList<UUID> teleportOnJoin = new ArrayList<>();
 
-	@Override
-	public void onInitialize() {
-		LOGGER.info("Loading ACSS Companion mod");
+    @Override
+    public void onInitialize() {
+        LOGGER.info("Loading ACSS Companion mod");
         loadWhitelist();
         CommandRegistrationCallback.EVENT.register(this::verificationCommands);
         ServerPlayConnectionEvents.JOIN.register(this::greetPlayer);
@@ -67,6 +69,14 @@ public class ACSSServerCompanion implements ModInitializer {
             try (BufferedReader reader = new BufferedReader(new FileReader(whitelistFile))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
+                    boolean shouldTP = false;
+                    // account was verified while not on the server
+                    // the whitespace is intentional. the line should not end with whitespace
+                    if (line.endsWith(" OFFLINE")) {
+                        line = line.substring(0, line.length() - " OFFLINE".length());
+                        LOGGER.info("{} was added to the whitelist manually, fixing.", line);
+                        shouldTP = true;
+                    }
                     String[] parts = line.split("\\s+");
 
                     // one account -> length = 5. two accounts -> length = 8
@@ -112,11 +122,19 @@ public class ACSSServerCompanion implements ModInitializer {
                         }
                         String playerName2 = parts[7];
                         verifiedMembers.addPlayer(m, uuid2, playerName2, con2);
+                        if (shouldTP) {
+                            teleportOnJoin.add(uuid2);
+                        }
+                    }
+                    if (shouldTP) {
+                        teleportOnJoin.add(uuid);
                     }
                 }
             } catch (IOException e) {
                 LOGGER.error(e.getMessage());
             }
+            // sync file to fix any OFFLINE lines
+            verifiedMembers.writeMap(whitelistFile);
         } else {
             LOGGER.info("Creating ACSS whitelist file...");
             try {
@@ -130,7 +148,7 @@ public class ACSSServerCompanion implements ModInitializer {
     private void verificationCommands(CommandDispatcher<ServerCommandSource> dispatcher, CommandRegistryAccess registryAccess, RegistrationEnvironment environment) {
         dispatcher.register(CommandManager
             .literal("verify")
-                .executes(ACSSServerCompanion::verifyHelp)
+            .executes(ACSSServerCompanion::verifyHelp)
             .then(CommandManager.literal("help")
                 .executes(ACSSServerCompanion::verifyHelp))
             .then(CommandManager.literal("id")
@@ -146,9 +164,9 @@ public class ACSSServerCompanion implements ModInitializer {
 
         dispatcher.register(CommandManager
             .literal("adminVerify").requires(source -> source.hasPermissionLevel(4))
-                .then(CommandManager.argument("player", EntityArgumentType.player())
-                    .then(CommandManager.argument("student id", IntegerArgumentType.integer())
-                        .executes(this::adminVerify))));
+            .then(CommandManager.argument("player", EntityArgumentType.player())
+                .then(CommandManager.argument("student id", IntegerArgumentType.integer())
+                    .executes(this::adminVerify))));
 
         dispatcher.register(CommandManager
             .literal("acssWhitelistReload")
@@ -238,6 +256,15 @@ public class ACSSServerCompanion implements ModInitializer {
     // TODO
 
     private void greetPlayer(ServerPlayNetworkHandler handler, PacketSender sender, MinecraftServer server) {
+        // TP players verified offline back to spawn when they join
+        int tp_player = teleportOnJoin.indexOf(handler.player.getUuid());
+        if (tp_player != -1) {
+            ServerWorld w = server.getWorld(World.OVERWORLD);
+            TeleportTarget tp = new TeleportTarget(w, w.getSpawnPos().toCenterPos(), Vec3d.ZERO, w.getSpawnAngle(), 0.0f, TeleportTarget.NO_OP);
+            handler.player.teleportTo(tp);
+            teleportOnJoin.remove(tp_player);
+        }
+
         if (handler.player.hasPermissionLevel(4)) {
             handler.player.sendMessage(MessageFormatter.makeMessage("MSPT: " + server.getAverageTickTime() + " TPS: " + Math.min(20.0, 1 / (server.getAverageTickTime() / 1000))));
             handler.player.sendMessage(MessageFormatter.makeMessage("Players online: " + Arrays.asList(server.getPlayerNames()).stream().collect(Collectors.joining(" "))));
